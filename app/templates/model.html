@@ -66,6 +66,84 @@
   </div>
 </div>
 
+<h2>入仓分流核查（对已发布固件证明全部合法报文的队列去向）</h2>
+<div class="card">
+  <p class="muted">
+    选择一版<b>已发布固件</b>，粘贴最多 8 条规则的 JSON 数组，每条形如
+    <code>{"queue": "队列名", "schema": {受限JSON Schema}}</code>。
+    同一报文匹配同名队列的多条规则时只算一个去向。系统在该固件允许的<b>全部</b>合法报文上
+    枚举命中组合（z3 逻辑证明，支持顶层 anyOf，区分字段缺省与显式 null），
+    找出<b>漏投</b>（没有队列收件）与<b>多投</b>（多个队列同时收件）的全部异常组合，
+    每个组合给一条合法报文并列出其实际命中的完整队列名单。
+    只有证明每条合法报文都恰好进入一个队列才显示<b>通过</b>；未能判全时显示<b>待核</b>。
+  </p>
+  <form method="post" action="/models/{{ model.name }}/routing">
+    <p>固件版本：
+      <select id="routing_fw" name="firmware_version" required>
+        {% for f in firmwares %}
+        <option value="{{ f.version }}"
+          {% if routing and routing.selected_version == f.version %}selected{% endif %}>v{{ f.version }}</option>
+        {% else %}
+        <option value="" disabled>（请先发布至少一版固件）</option>
+        {% endfor %}
+      </select>
+    </p>
+    <textarea id="routing_rules" name="rules_text" style="min-height:220px"
+      placeholder='[{"queue": "auto", "schema": {"type":"object","properties":{...},"required":[...],"additionalProperties":false}}]'></textarea>
+    <p><button type="submit" {% if not firmwares %}disabled{% endif %}>执行分流核查</button></p>
+  </form>
+  {% for ex in routing_examples %}
+  <button type="button" class="btn-sm" onclick="fillRouting(this)"
+          data-rules='{{ ex.rules | tojsonc }}'>填入：{{ ex.title }}</button>
+  {% endfor %}
+  {% for ex in routing_examples %}
+  <p class="muted" style="margin:4px 0 0">· {{ ex.title }}：{{ ex.story }}</p>
+  {% endfor %}
+</div>
+
+{% if routing %}
+  {% if routing.error %}
+  <div class="card notice-bad"><h3>✘ 核查输入无效</h3><p>{{ routing.error }}</p></div>
+  {% else %}
+  <div class="card {{ 'notice-ok' if routing.status == 'pass' else ('notice-bad' if routing.status == 'anomaly' else 'cex') }}">
+    {% if routing.status == 'pass' %}
+    <h3>✔ 分流核查通过</h3>
+    <p>已证明固件 <b>v{{ routing.firmware_version }}</b> 的每条合法报文都恰好进入一个队列
+       （枚举了 {{ routing.enumerated_vectors }} 种可实现的命中组合，全部为单队列去向）。</p>
+    {% elif routing.status == 'anomaly' %}
+    <h3>✘ 发现异常去向组合（{{ routing.anomaly_count }} 个）</h3>
+    <p>固件 <b>v{{ routing.firmware_version }}</b> 存在漏投或多投的合法报文；下表每个组合附一条合法报文
+       及其实际命中的完整队列名单（已枚举全部 {{ routing.enumerated_vectors }} 种可实现组合）。</p>
+    {% else %}
+    <h3>⏳ 待核</h3>
+    <p>{{ routing.reason or '未能判全全部合法报文' }}；以下为已枚举到的 {{ routing.enumerated_vectors }} 种组合。</p>
+    {% endif %}
+    <table>
+      <tr><th>类型</th><th>实际命中的完整队列名单</th><th>合法报文样本</th><th>命中规则（下标/队列）</th></tr>
+      {% for c in routing.combos %}
+      <tr>
+        <td>
+          {% if c.kind == 'none' %}<span style="color:var(--bad)">漏投 · 无队列收件</span>
+          {% elif c.kind == 'multi' %}<span style="color:var(--bad)">多投 · {{ c.size }} 个队列</span>
+          {% else %}<span style="color:var(--ok)">正常 · 单队列</span>{% endif %}
+        </td>
+        <td>
+          {% if c.queues %}
+            {% for q in c.queues %}<span class="tag">{{ q }}</span>{% endfor %}
+          {% else %}<span class="err">（空）</span>{% endif %}
+        </td>
+        <td><pre>{{ c.message | tojson }}</pre></td>
+        <td class="muted">
+          {% for mr in c.matched_rules %}[{{ mr.index }}] {{ mr.queue }}<br>
+          {% else %}—{% endfor %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% endif %}
+{% endif %}
+
 <h2>示例（点击填入编辑器）</h2>
 {% for ex in examples %}
 <div class="card">
@@ -110,5 +188,13 @@ function fillSnippet(btn) {
     document.getElementById('prog_schema').scrollIntoView({behavior: 'smooth'});
   }
 }
+function fillRouting(btn) {
+  const rules = JSON.parse(btn.dataset.rules);
+  document.getElementById('routing_rules').value = JSON.stringify(rules, null, 2);
+  document.getElementById('routing_rules').scrollIntoView({behavior: 'smooth'});
+}
+{% if routing and routing.rules_text %}
+document.getElementById('routing_rules').value = {{ routing.rules_text | tojson }};
+{% endif %}
 </script>
 {% endblock %}

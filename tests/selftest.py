@@ -185,6 +185,7 @@ def main():
     ok("型号页可打开", r.status_code == 200 and "历代固件写入格式" in r.text
        and "现用程序读取格式" in r.text and "发布日志" in r.text)
     ok("页面含示例", "温度扩范围" in r.text and "质控码缺省" in r.text)
+    ok("页面含分流核查区", "入仓分流核查" in r.text and "分流示例" in r.text)
     r = c.post(f"/models/{model}/firmware",
                data={"schema_text": json.dumps(temp_doc(-40, 100))})
     ok("网页表单发布固件被拒并展示依据", r.status_code == 200
@@ -193,6 +194,81 @@ def main():
                data={"program_id": "analyzer",
                       "schema_text": json.dumps(temp_doc(-40, 100, qc=["N", "Q", None]))})
     ok("网页表单发布程序成功", r.status_code == 200 and "发布成功" in r.text, str(r.status_code))
+
+    # ---- 入仓分流核查（JSON API + 网页表单） ----
+    print("入仓分流核查")
+    from examples import (ROUTING_RULES_DUP, ROUTING_RULES_MISS,  # noqa: E402
+                          ROUTING_RULES_OK)
+    from routing import MAX_RULES  # noqa: E402
+    # 选一份含 qc 字段的已发布固件（示例二发布的 v3；不能取 max——上限测试又追加了无 qc 的固件）
+    states = c.get(f"/api/models/{model}").json()
+    v3 = next(f["version"] for f in states["firmwares"]
+              if "qc" in f["schema"].get("properties", {}))
+
+    # 通过场景：每条合法报文恰好一个队列
+    r = c.post(f"/api/models/{model}/routing",
+               json={"firmware_version": v3, "rules": ROUTING_RULES_OK})
+    body = r.json()
+    ok("分流API:通过场景pass", r.status_code == 200 and body["status"] == "pass"
+       and body["anomaly_count"] == 0 and body["complete"] is True, r.text)
+    ok("分流API:全部组合单队列", all(x["size"] == 1 for x in body["combos"]))
+
+    # 漏投场景
+    r = c.post(f"/api/models/{model}/routing",
+               json={"firmware_version": v3, "rules": ROUTING_RULES_MISS})
+    body = r.json()
+    ok("分流API:漏投判anomaly", r.status_code == 200 and body["status"] == "anomaly", r.text)
+    none_combo = next(x for x in body["combos"] if x["kind"] == "none")
+    ok("分流API:漏投样本无命中且满足固件",
+       none_combo["queues"] == [] and none_combo["matched_rules"] == [])
+    ok("分流API:漏投样本区分缺省/null",
+       "qc" not in none_combo["message"] or none_combo["message"]["qc"] is None,
+       json.dumps(none_combo["message"]))
+
+    # 多投场景：完整队列名单含两个队列
+    r = c.post(f"/api/models/{model}/routing",
+               json={"firmware_version": v3, "rules": ROUTING_RULES_DUP})
+    body = r.json()
+    ok("分流API:多投判anomaly", r.status_code == 200 and body["status"] == "anomaly", r.text)
+    multi = next(x for x in body["combos"] if x["kind"] == "multi")
+    ok("分流API:多投名单为auto+manual", multi["queues"] == ["auto", "manual"],
+       json.dumps(multi))
+    ok("分流API:多投样本合法", multi["message"].get("qc") in ("N", "Q"))
+
+    # 输入校验
+    r = c.post(f"/api/models/{model}/routing",
+               json={"firmware_version": 999, "rules": ROUTING_RULES_OK})
+    ok("分流API:不存在固件报422", r.status_code == 422 and not r.json()["ok"], r.text)
+    r = c.post(f"/api/models/{model}/routing",
+               json={"firmware_version": v3, "rules": []})
+    ok("分流API:空规则报422", r.status_code == 422 and "不能为空" in r.json()["error"], r.text)
+    r = c.post(f"/api/models/{model}/routing",
+               json={"firmware_version": v3,
+                     "rules": [{"queue": "q", "schema": {"type": "object",
+                                                        "properties": {"a": {"type": "string"}},
+                                                        "additionalProperties": False}}]})
+    ok("分流API:受限语法外规则报422", r.status_code == 422, r.text)
+    r = c.post(f"/api/models/{model}/routing",
+               json={"firmware_version": v3,
+                     "rules": [{"queue": f"q{i}", "schema": ROUTING_RULES_MISS[0]["schema"]}
+                               for i in range(MAX_RULES + 1)]})
+    ok("分流API:超8条规则报422", r.status_code == 422 and "最多" in r.json()["error"], r.text)
+
+    # 网页表单：多投场景在型号页展示异常组合
+    r = c.post(f"/models/{model}/routing",
+               data={"firmware_version": str(v3),
+                     "rules_text": json.dumps(ROUTING_RULES_DUP)})
+    ok("分流网页:展示异常与队列名单", r.status_code == 200 and "发现异常去向组合" in r.text
+       and "多投" in r.text and "auto" in r.text and "manual" in r.text, str(r.status_code))
+    # 网页表单：通过场景展示通过
+    r = c.post(f"/models/{model}/routing",
+               data={"firmware_version": str(v3),
+                     "rules_text": json.dumps(ROUTING_RULES_OK)})
+    ok("分流网页:展示通过", r.status_code == 200 and "分流核查通过" in r.text, str(r.status_code))
+    # 网页表单：非法 JSON 不炸页
+    r = c.post(f"/models/{model}/routing",
+               data={"firmware_version": str(v3), "rules_text": "{not json"})
+    ok("分流网页:非法JSON显示无效提示", r.status_code == 200 and "核查输入无效" in r.text)
 
     print(f"\n全部 {len(PASS)} 项集成自测通过")
     return model

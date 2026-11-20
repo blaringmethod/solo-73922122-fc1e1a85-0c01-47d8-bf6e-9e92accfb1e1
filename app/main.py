@@ -12,9 +12,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 import service
+import routing as routing_mod
 from db import (Base, DeviceModel, FirmwareFormat, ProgramFormat, PublishLog,
                 SessionLocal, engine)
-from examples import EXAMPLES
+from examples import EXAMPLES, ROUTING_EXAMPLES
+from schema_spec import SchemaError, parse_schema
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -71,8 +73,9 @@ def _model_context(name: str, result=None):
         s.expunge_all()
         return {
             "model": model, "firmwares": firmwares, "programs": programs,
-            "logs": logs, "examples": EXAMPLES, "result": result,
-            "max_formats": service.MAX_FORMATS,
+            "logs": logs, "examples": EXAMPLES,
+            "routing_examples": ROUTING_EXAMPLES, "result": result,
+            "routing": None, "max_formats": service.MAX_FORMATS,
         }
 
 
@@ -141,6 +144,44 @@ def prog_publish_html(request: Request, name: str,
                                       _model_context(name, result=outcome))
 
 
+def _run_routing(model_id: int, version: int, rules_text: str):
+    """分流核查共用逻辑：取已发布固件 -> 解析规则数组 -> z3 全量枚举去向组合。"""
+    with SessionLocal() as s:
+        fw = s.execute(select(FirmwareFormat)
+                       .where(FirmwareFormat.model_id == model_id,
+                              FirmwareFormat.version == version)).scalar_one_or_none()
+        if fw is None:
+            return {"error": f"固件 v{version} 不存在，请先发布该版本",
+                    "rules_text": rules_text, "selected_version": version}
+        fw_doc = fw.doc
+    try:
+        rules_raw = json.loads(rules_text)
+    except json.JSONDecodeError as e:
+        return {"error": f"规则 JSON 解析失败：{e}", "rules_text": rules_text,
+                "selected_version": version}
+    try:
+        rules = routing_mod.parse_rules(rules_raw)
+        firmware = parse_schema(fw_doc)
+        report = routing_mod.check_routing(firmware, rules)
+    except (routing_mod.RoutingError, SchemaError) as e:
+        return {"error": str(e), "rules_text": rules_text, "selected_version": version}
+    report["firmware_version"] = version
+    report["rules_text"] = rules_text
+    report["selected_version"] = version
+    return report
+
+
+@app.post("/models/{name}/routing", response_class=HTMLResponse)
+def routing_check_html(request: Request, name: str,
+                       firmware_version: int = Form(...),
+                       rules_text: str = Form(...)):
+    model = _get_model_or_404(name)
+    report = _run_routing(model.id, firmware_version, rules_text)
+    ctx = _model_context(name)
+    ctx["routing"] = report
+    return templates.TemplateResponse(request, "model.html", ctx)
+
+
 # ---------------- JSON API ----------------
 
 class ModelIn(BaseModel):
@@ -156,6 +197,11 @@ class ProgramIn(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     program_id: str
     doc: dict = Field(alias="schema")
+
+
+class RoutingIn(BaseModel):
+    firmware_version: int
+    rules: list
 
 
 def _outcome_response(outcome: service.PublishOutcome, extra=None):
@@ -222,3 +268,13 @@ def api_publish_program(name: str, body: ProgramIn):
     model = _get_model_or_404(name)
     outcome = service.publish_program(model.id, body.program_id.strip(), body.doc)
     return _outcome_response(outcome)
+
+
+@app.post("/api/models/{name}/routing")
+def api_routing_check(name: str, body: RoutingIn):
+    model = _get_model_or_404(name)
+    report = _run_routing(model.id, body.firmware_version, json.dumps(body.rules))
+    if "error" in report:
+        return JSONResponse({"ok": False, "error": report["error"]}, status_code=422)
+    report["ok"] = True
+    return JSONResponse(report, status_code=200)

@@ -97,6 +97,88 @@ ANYOF_PROG = {
     ]
 }
 
+# ---------------- 入仓分流核查示例（基于 QC_FW 固件） ----------------
+# 固件合法报文：temp 必填、site 必填，qc 可缺省/可为 null/取 "N"/"Q"
+# 队列：auto（自动入仓）、manual（人工复核）
+
+# 场景一：通过——按 qc 形态把报文空间恰好切成三块，每条报文只进一个队列
+ROUTING_RULES_OK = [
+    {"queue": "auto", "schema": {
+        "type": "object",
+        "properties": {
+            "temp": {"type": "integer", "minimum": -40, "maximum": 100},
+            "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
+            "qc": {"enum": ["N", "Q"]},
+        },
+        "required": ["temp", "site", "qc"],
+        "additionalProperties": False}},
+    {"queue": "manual", "schema": {
+        "type": "object",
+        "properties": {
+            "temp": {"type": "integer", "minimum": -40, "maximum": 100},
+            "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
+            "qc": {"type": "null"},
+        },
+        "required": ["temp", "site", "qc"],
+        "additionalProperties": False}},
+    {"queue": "manual", "schema": {
+        "type": "object",
+        "properties": {
+            "temp": {"type": "integer", "minimum": -40, "maximum": 100},
+            "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
+        },
+        "required": ["temp", "site"],
+        "additionalProperties": False}},
+]
+
+# 场景二：漏投——只收 qc 取 N/Q 的报文，qc 缺省或显式 null 的报文没有任何队列收件
+ROUTING_RULES_MISS = [
+    {"queue": "auto", "schema": {
+        "type": "object",
+        "properties": {
+            "temp": {"type": "integer", "minimum": -40, "maximum": 100},
+            "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
+            "qc": {"enum": ["N", "Q"]},
+        },
+        "required": ["temp", "site", "qc"],
+        "additionalProperties": False}},
+]
+
+# 场景三：多投——manual 收全部报文（含 qc 缺省/null），与只收 N/Q 的 auto 重叠
+ROUTING_RULES_DUP = [
+    {"queue": "auto", "schema": {
+        "type": "object",
+        "properties": {
+            "temp": {"type": "integer", "minimum": -40, "maximum": 100},
+            "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
+            "qc": {"enum": ["N", "Q"]},
+        },
+        "required": ["temp", "site", "qc"],
+        "additionalProperties": False}},
+    {"queue": "manual", "schema": {
+        "type": "object",
+        "properties": {
+            "temp": {"type": "integer", "minimum": -40, "maximum": 100},
+            "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
+            "qc": {"enum": ["N", "Q", None]},
+        },
+        "required": ["temp", "site"],
+        "additionalProperties": False}},
+]
+
+ROUTING_EXAMPLES = [
+    {"key": "ok", "title": "分流示例一：恰好一个队列（应通过）",
+     "story": "qc 取 N/Q 进自动入仓；qc 显式 null 或字段缺省进人工复核（同名队列两条规则只算一个去向）。",
+     "rules": ROUTING_RULES_OK},
+    {"key": "miss", "title": "分流示例二：漏投（没有队列收件）",
+     "story": "只有自动入仓一条规则，qc 缺省或显式 null 的合法报文匹配不到任何队列。",
+     "rules": ROUTING_RULES_MISS},
+    {"key": "dup", "title": "分流示例三：多投（两个队列同时收件）",
+     "story": "人工复核规则收全部报文，与自动入仓在 qc 取 N/Q 的报文上重叠，造成同时进两个队列。",
+     "rules": ROUTING_RULES_DUP},
+]
+
+
 EXAMPLES = [
     {
         "title": "示例一：温度扩范围",
